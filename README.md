@@ -101,7 +101,8 @@ For help, bug reports, or questions, contact:
 
 **João Cortez**
 Sales Engineer at Nextcloud GmbH
-📧 Email: [joao.cortez@nextcloud.com](mailto:joao.cortez@nextcloud.com)
+📧 Professional Email: [joao.cortez@nextcloud.com](mailto:joao.cortez@nextcloud.com)
+📧 Personal Email: [joao@jbcortezf.com](mailto:joao@jbcortezf.com)
 
 ---
 
