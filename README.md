@@ -48,7 +48,7 @@ cd nextcloud-talk-hpb-enterprise
 2. Run the playbook as root (it will prompt for configuration values):
 
 ```bash
-sudo ansible-playbook talk-hpb.yml
+sudo ansible-playbook talk-hpb-standalone-enterprise.yml
 ```
 
 3. The playbook will ask for:
