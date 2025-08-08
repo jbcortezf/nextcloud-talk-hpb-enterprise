@@ -101,7 +101,11 @@ For help, bug reports, or questions, contact:
 
 **João Cortez**
 Sales Engineer at Nextcloud GmbH
+
+For help with this script if you're Nextcloud Customer
 📧 Professional Email: [joao.cortez@nextcloud.com](mailto:joao.cortez@nextcloud.com)
+
+For any other subjects
 📧 Personal Email: [joao@jbcortezf.com](mailto:joao@jbcortezf.com)
 
 ---
