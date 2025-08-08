@@ -1,0 +1,254 @@
+---
+# ==========================================================
+# Nextcloud GmbH
+# Talk HPB Standalone Enterprise Automated Install
+# Written by João Cortez - joao.cortez@nextcloud.com
+# ==========================================================
+# This playbook will:
+#  - Prompt for Cloud URL, Talk HPB URL and Talk HPB repository key
+#  - Install required packages
+#  - Request Let's Encrypt certificates (nginx mode, no manual restarts)
+#  - Configure Nginx default and signaling site
+#  - Add Spreed repository and install Spreed full package
+#  - Configure server.conf backend URL (Cloud) and secret (random)
+#  - Save and display credentials
+#  - Schedule a system reboot at the end (no service restarts during run)
+# ==========================================================
+
+- name: Provision Nextcloud Talk HPB (Signaling) on local Ubuntu (no service restarts)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+    - name: __banner_ack
+      prompt: |
+        =========================================================
+        Nextcloud GmbH
+        Talk HPB Standalone Enterprise Automated Install
+        =========================================================
+        Press ENTER to continue...
+      private: no
+    - name: cloud_url
+      prompt: "Cloud URL (e.g. cloud.yourcompany.com)"
+      private: no
+    - name: talk_url
+      prompt: "Talk HPB URL (e.g. talk.yourcompany.com)"
+      private: no
+    - name: talk_key
+      prompt: "Talk HPB Repository Key (from Struktur/Nextcloud repository)"
+      private: no
+
+  pre_tasks:
+    - name: Validate required inputs
+      ansible.builtin.assert:
+        that:
+          - cloud_url is match('^[a-zA-Z0-9.-]+$')
+          - talk_url  is match('^[a-zA-Z0-9.-]+$')
+          - talk_key  != ""
+        fail_msg: "cloud_url, talk_url and talk_key are mandatory and must be valid."
+
+    - name: Get distro codename
+      ansible.builtin.set_fact:
+        distro_codename: "{{ ansible_distribution_release | lower }}"
+
+    - name: Generate random token (hex 64)
+      ansible.builtin.set_fact:
+        talk_secret_token: "{{ lookup('password', '/dev/null length=64 chars=hexdigits') | lower }}"
+
+  tasks:
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - python3-certbot-nginx
+          - gpg
+          - ca-certificates
+        state: present
+
+    - name: Request SSL certificate (nginx mode, no manual stop/start)
+      ansible.builtin.command: >
+        certbot --nginx
+        -d {{ talk_url }}
+        --non-interactive --agree-tos
+        --register-unsafely-without-email
+      register: certbot_run
+      changed_when: certbot_run.rc == 0
+      ignore_errors: true
+
+    - name: Write default nginx site
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/default
+        mode: '0644'
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              root /var/www/html;
+              index index.html index.htm index.nginx-debian.html;
+              server_name _;
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+          }
+
+    - name: Ensure default site symlink
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/default
+        dest: /etc/nginx/sites-enabled/default
+        state: link
+        force: true
+
+    - name: Write signaling site configuration
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/signaling
+        mode: '0644'
+        content: |
+          upstream signaling {
+              server 127.0.0.1:8080;
+          }
+
+          server {
+              server_name {{ talk_url }};
+              listen 443 ssl http2;
+              listen [::]:443 ssl http2;
+
+              ssl_certificate /etc/letsencrypt/live/{{ talk_url }}/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/{{ talk_url }}/privkey.pem;
+              include /etc/letsencrypt/options-ssl-nginx.conf;
+              ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+              add_header Strict-Transport-Security "max-age=63072000; includeSubdomains; preload";
+
+              location /standalone-signaling/ {
+                  proxy_pass http://signaling/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+
+              location /standalone-signaling/spreed {
+                  proxy_pass http://signaling/spreed;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "Upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+          }
+
+          server {
+              if ($host = {{ talk_url }}) {
+                  return 301 https://$host$request_uri;
+              }
+              listen 80;
+              listen [::]:80;
+              server_name {{ talk_url }};
+              return 404;
+          }
+
+    - name: Enable signaling site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/signaling
+        dest: /etc/nginx/sites-enabled/signaling
+        state: link
+        force: true
+
+    - name: Download Struktur public key
+      ansible.builtin.get_url:
+        url: "https://nextcloud.packages.struktur.de/spreed/{{ talk_key }}/struktur-ag-deb-sign-1.pub"
+        dest: /tmp/struktur-ag-deb-sign-1.pub
+        mode: '0644'
+
+    - name: Add Struktur public key to global APT keyring
+      ansible.builtin.command: apt-key add /tmp/struktur-ag-deb-sign-1.pub
+
+    - name: Add Spreed repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/nextcloud-spreed-repository.list
+        mode: '0644'
+        content: |
+          deb [arch=amd64] https://nextcloud.packages.struktur.de/spreed/{{ talk_key }}/ubuntu {{ distro_codename }} main
+
+    - name: apt update (tolerant to 'Release file not valid yet')
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-get update || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
+    - name: Install Spreed full package
+      ansible.builtin.apt:
+        name: nextcloud-spreed-services-full
+        state: present
+
+    - name: Adjust listen port to 8080 in [http] section
+      ansible.builtin.replace:
+        path: /etc/nextcloud-spreed-signaling/server.conf
+        regexp: '(^\s*listen\s*=\s*127\.0\.0\.1:)(8088|8080)\s*$'
+        replace: 'listen = 127.0.0.1:8080'
+
+    - name: Ensure [backend-1] url is Cloud URL
+      ansible.builtin.ini_file:
+        path: /etc/nextcloud-spreed-signaling/server.conf
+        section: backend-1
+        option: url
+        value: "https://{{ cloud_url }}"
+        backup: yes
+
+    - name: Ensure [backend-1] secret is set
+      ansible.builtin.ini_file:
+        path: /etc/nextcloud-spreed-signaling/server.conf
+        section: backend-1
+        option: secret
+        value: "{{ talk_secret_token }}"
+        backup: yes
+
+    - name: Save credentials to /root/talk-hpb-credentials.txt
+      ansible.builtin.copy:
+        dest: /root/talk-hpb-credentials.txt
+        mode: '0600'
+        content: |
+          ============================================
+          Nextcloud Talk HPB - Configuration Credentials
+          ============================================
+          Signaling server URL: https://{{ talk_url }}/standalone-signaling
+          Secret: {{ talk_secret_token }}
+          ============================================
+          Saved at: /root/talk-hpb-credentials.txt
+
+    - name: Display credentials clearly
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Nextcloud Talk HPB - Configuration Credentials
+          ============================================
+          Signaling server URL: https://{{ talk_url }}/standalone-signaling
+          Secret: {{ talk_secret_token }}
+          ============================================
+          (Also saved at /root/talk-hpb-credentials.txt)
+
+    - name: Confirm reboot
+      ansible.builtin.pause:
+        prompt: "Press ENTER to schedule reboot in 3 seconds (or CTRL+C then 'A' to abort)."
+
+    - name: Schedule reboot in background (localhost)
+      ansible.builtin.shell: |
+        nohup bash -c 'sleep 3; /sbin/shutdown -r now' >/dev/null 2>&1 &
+      args:
+        executable: /bin/bash
+
+    - name: Reboot notice
+      ansible.builtin.debug:
+        msg: "Reboot will happen in ~3s. Ansible connection will be lost."
+
+    - meta: end_play
